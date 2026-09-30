@@ -1,0 +1,6 @@
+#include <windows.h>
+#include "assets/assets.h"
+
+IDI_TAILMAPPER ICON "assets/TailMapper.ico"
+GLFW_ICON ICON "assets/TailMapper.ico"
+IDR_FONT_APTOS RCDATA "assets/Aptos.ttf"
