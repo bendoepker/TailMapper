@@ -7,7 +7,7 @@ Manage the mappings on your machine
 ## TailMapperExpose.exe
 Manage the exposed mappings on the remote machine
 
-# Architecture
+# General Architecture
 ```mermaid
 ---
 config:
@@ -37,6 +37,23 @@ flowchart LR
 
     linkStyle 0,1,2,3,12,13,15 stroke:green
     linkStyle 4,5,6,7,8,9,10,11 stroke:red
+```
+
+# Thread Layout
+TLDR; The main thread is the communication layer between the GUI, Tailscale Runner, and WinDivert
+```mermaid
+---
+config:
+    theme: 'neutral'
+---
+flowchart LR
+    mt[Main Thread] --> |Spawn| gt[GUI Thread]
+    gt --> |User input| mt
+    mt -.- mtd([Central communication between WinDivert, GUI, and Tailscale Runner])
+    mt --> |Spawn| trt[Tailscale Runner Thread]
+    mt --> |Add / Remove mapping rules| wdv[WinDivert]
+    gt -.- gtd([Send all user interactions to the main thread])
+    trt -.- trtd([Synchronize with tailscale state, update Global state and send signals to main thread])
 ```
 
 # Building

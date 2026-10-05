@@ -26,7 +26,10 @@ add_executable(tailmapper
     vendor/imgui/imgui_widgets.cpp
 )
 
-target_compile_definitions(tailmapper PRIVATE _CRT_SECURE_NO_WARNINGS)
+target_compile_definitions(tailmapper PRIVATE
+    _CRT_SECURE_NO_WARNINGS
+    $<$<CONFIG:Debug>:TM_DEBUG>
+)
 
 target_include_directories(tailmapper PRIVATE
     ${CMAKE_SOURCE_DIR}/vendor/windivert/include

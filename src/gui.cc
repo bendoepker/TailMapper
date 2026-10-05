@@ -14,7 +14,6 @@ static void glfw_error_callback(int error, const char* description)
 }
 
 ULONG UI::Thread(void *_g) {
-    printf("UI::Thread()\n");
     Global *g = (Global*)_g;
     if(!g)
         return 1;
@@ -50,7 +49,7 @@ void UI::Window(Global *g) {
         return;
     }
 
-    g->gui_hwnd = glfwGetWin32Window(window);
+    g->gui_window = glfwGetWin32Window(window);
 
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1); // VSync
@@ -73,29 +72,26 @@ void UI::Window(Global *g) {
 
     ImGui::StyleColorsDark();
 
-    // Backend setup
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
-    // Main loop
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
 
-        // Start new ImGui frame
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
-        ImGui::NewFrame();
 
-        // --------------------------
-        // Your UI goes here
-        // --------------------------
+        /* This is contributing to the danger described in tailnet.cc,
+         * once again, I'm just going to ignore it... */
+        while(g->ts.status_refresh_ongoing);
+        g->gui_sleeping = false;
+        ImGui::NewFrame();
 
         UI::Frame(g);
 
-        // --------------------------
-
         ImGui::Render();
+        g->gui_sleeping = true;
 
         int display_width;
         int display_height;
@@ -126,7 +122,7 @@ void UI::Window(Global *g) {
     glfwDestroyWindow(window);
     glfwTerminate();
 
-    g->gui_hwnd = 0;
+    g->gui_window = 0;
 
     return;
 }
@@ -189,7 +185,7 @@ void UI::SitesTable(Global *g) {
 
         ImGui::TableHeadersRow();
 
-        for (const auto& [site_id, site] : g->site_map)
+        for (const auto& [site_id, site] : *g->gui.site_map)
         {
             ImGui::TableNextRow();
 
@@ -211,7 +207,6 @@ void UI::SitesTable(Global *g) {
                 g->gui.selected_site = site.id;
                 g->gui.site_popup_open = true;
                 open_site_popup = true;
-                DEBUG("Clicked site");
             }
 
             ImGui::PopID();
@@ -236,17 +231,15 @@ void render_site_dialog(Global *g) {
             &g->gui.site_popup_open,
             ImGuiWindowFlags_AlwaysAutoResize))
     {
-        printf("Site open: %d\n", g->gui.selected_site);
         if (!(g->gui.selected_site > U16MAX))
         {
-            if (!g->site_map.contains(g->gui.selected_site)) {
-                DEBUG("Site ID not in map\n");
+            if (!(*g->gui.site_map).contains(g->gui.selected_site)) {
                 ImGui::CloseCurrentPopup();
                 g->gui.selected_site = U16MAX;
                 g->gui.site_popup_open = false;
             }
             auto site_id = g->gui.selected_site;
-            auto site = g->site_map.at(site_id);
+            auto site = (*g->gui.site_map).at(site_id);
             auto site_name = site.name.c_str();
             auto site_ip = ip_to_str(site.ip);
 

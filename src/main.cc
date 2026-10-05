@@ -3,26 +3,12 @@
 #include <shellapi.h>
 #include "../assets/assets.h"
 #include "gui.hh"
+#include "tailnet.hh"
 
 #define WM_TRAYICON (WM_USER + 1)
 #define ID_TRAY_EXIT 2001
 #define TRAY_ICON_ID 1
 #define UI_MESSAGE_QUEUE_SIZE 1024
-
-/* Messages sent from the GUI thread to the main thread */
-/* Refresh the mappings displayed in the main table */
-/* LPARAM and WPARAM are disregarded */
-constexpr UINT WM_TM_REFRESH = WM_APP + 1;
-
-/* Enable a subnet mapping */
-/* WPARAM is set to the site id */
-/* LPARAM is set to the subnet index in Global */
-constexpr UINT WM_TM_ENABLE_MAP = WM_APP + 2;
-
-/* Disable a subnet mapping */
-/* WPARAM is set to the site id */
-/* LPARAM is set to the subnet index in Global */
-constexpr UINT WM_TM_DISABLE_MAP = WM_APP + 3;
 
 HINSTANCE hInst;
 NOTIFYICONDATA nid = { 0 };
@@ -32,10 +18,13 @@ void add_tray_icon(HWND hWnd);
 void remove_tray_icon();
 void start_gui(Global *g);
 s32 init_gui_data(Global& g);
-void make_test_data(Global& g);
+s32 init_global_data(Global& g);
+void post_ts_message(Global& g, UINT msg, WPARAM wParam, LPARAM lParam);
+void post_pm_message(Global& g, UINT msg, WPARAM wParam, LPARAM lPARAM);
+LRESULT CALLBACK handle_custom_messages(UINT msg, WPARAM wParam, LPARAM lParam);
+void clean_resources(Global& g);
 
 int main(s32 argc, char **argv, char **envp) {
-    DEBUG("main()\n");
     return WinMain(
             GetModuleHandleW(nullptr),
             nullptr,
@@ -45,7 +34,6 @@ int main(s32 argc, char **argv, char **envp) {
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    DEBUG("WinMain()\n");
     HANDLE instance_mutex = CreateMutexW(
             nullptr,
             FALSE,
@@ -62,11 +50,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     hInst = hInstance;
     Global g {};
+    if(init_global_data(g))
+        return 1;
     if(init_gui_data(g))
         return 1;
-    make_test_data(g);
-
-    DEBUG("Made test data");
+    if(TS::init(g))
+        return 1;
 
     WNDCLASSEX wc = { 0 };
     wc.cbSize = sizeof(WNDCLASSEX);
@@ -74,8 +63,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     wc.hInstance = hInstance;
     wc.lpszClassName = "TailMapperClass";
     RegisterClassEx(&wc);
-
-    DEBUG("RegisterClassEx()");
 
     HWND hWnd = CreateWindowEx(
         WS_EX_TOOLWINDOW,
@@ -86,12 +73,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         NULL, NULL, hInstance, &g
     );
 
-    DEBUG("CreateWindowEx()");
-
-    if (!hWnd) return 0;
-    g.main_thread = hWnd;
+    if (!hWnd) {
+        ERR("Failed to initialize main window");
+        return 1;
+    }
+    g.main_window = hWnd;
 
     add_tray_icon(hWnd);
+
+    g.ts_thread = CreateThread(NULL, 0, TS::thread, (void*)&g, 0, 0);
+    if(!g.ts_thread) {
+        ERR("Failed to initialize TS thread");
+        return 1;
+    }
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
@@ -110,13 +104,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
     /* Set up global struct so we can see them here */
     if (message == WM_NCCREATE) {
-        DEBUG("WndProc():WM_NCCREATE\n");
         auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
         g = static_cast<Global*>(create->lpCreateParams);
         SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(g));
     } else {
         g = reinterpret_cast<Global*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
     }
+
+    if(message > WM_APP)
+        return handle_custom_messages(message, wParam, lParam);
 
     switch (message) {
 
@@ -196,9 +192,9 @@ void start_gui(Global *g) {
             goto cont;
         }
         /* gui thread and window are already active, bring them to the front */
-        if(IsIconic(g->gui_hwnd))
-            ShowWindow(g->gui_hwnd, SW_RESTORE);
-        SetForegroundWindow(g->gui_hwnd);
+        if(IsIconic(g->gui_window))
+            ShowWindow(g->gui_window, SW_RESTORE);
+        SetForegroundWindow(g->gui_window);
         return;
     }
 
@@ -210,7 +206,6 @@ cont:
         g->gui_active = false;
         return;
     }
-    printf("GUI Thread: %p\n", g->gui_thread);
 }
 
 const char* ip_test_vals2[] = {
@@ -258,10 +253,53 @@ s32 init_gui_data(Global& g) {
     return 0;
 }
 
-void make_test_data(Global& g) {
-    DEBUG("make_test_data()\n");
-    for(u16 i = 0; i < 28; i++) {
-        printf("%d", i);
-        g.site_map.insert({i, Site({.id = i, .name = "Disney Land", .ip = parse_ip(ip_test_vals2[i])})});
+s32 init_global_data(Global& g) {
+    g.site_map_1 = map<u16, Site>{};
+    g.site_map_2 = map<u16, Site>{};
+
+    return 0;
+}
+
+void post_ts_message(Global& g, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if(g.ts_thread_id == 0) {
+        /* If the message queue isn't ready put the message back through the queue */
+        PostMessage(g.main_window, msg, wParam, lParam);
     }
+    PostThreadMessage(g.ts_thread_id, msg, wParam, lParam);
+}
+
+void post_pm_message(Global& g, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if(g.pm_thread_id == 0 ) {
+        PostMessage(g.main_window, msg, wParam, lParam);
+    }
+    PostThreadMessage(g.pm_thread_id, msg, wParam, lParam);
+}
+
+LRESULT CALLBACK handle_custom_messages(Global& g, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch(msg) {
+        case WM_TM_REFRESH:
+            post_ts_message(g, msg, wParam, lParam);
+            return 0;
+        case WM_TM_ENABLE_MAP:
+            post_pm_message(g, msg, wParam, lParam);
+            return 0;
+        case WM_TM_DISABLE_MAP:
+            post_pm_message(g, msg, 0, 0);
+        case WM_TM_FATAL_ERROR:
+            clean_resources(g);
+            PostQuitMessage(1);
+            return 1;
+        case WM_TM_LOGIN_PROMPT:
+            /* TODO: */
+            return 1;
+        case WM_TM_START_TAILSCALE:
+            post_ts_message(g, msg, 0, 0);
+            return 0;
+        default:
+            return 1;
+    }
+}
+
+void clean_resources(Global& g) {
+    /* TODO: */
 }
