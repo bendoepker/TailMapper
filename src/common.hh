@@ -6,36 +6,22 @@
 #include <vector>
 #include <chrono>
 #include <thread>
+#include <type_traits>
+#include <cstdlib>
 #include <map>
-
-typedef uint8_t u8;
-typedef uint16_t u16;
-typedef uint32_t u32;
-typedef uint64_t u64;
-typedef int8_t s8;
-typedef int16_t s16;
-typedef int32_t s32;
-typedef int64_t s64;
-typedef std::vector<std::string> strvec;
-
-using std::string;
-using std::vector;
-using std::map;
-using sclock = std::chrono::system_clock;
-using time_point = std::chrono::time_point<sclock>;
-inline auto to_ms = [](auto&& ...args) {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::forward<decltype(args)>(args)...
-            ).count();
-};
-inline auto sleep_ms = [](auto arg) {
-    return std::this_thread::sleep_for(std::chrono::milliseconds(arg));
-};
 
 #if !defined(__BYTE_ORDER__) || !(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
 /* Only supporting little endian system because of the way IPv6 addresses are stored */
 /* Its a simple change to implement but not a cost worthy one */
 #error "Only little endian systems are supported"
+#endif
+
+#if defined(__GNUC__) || defined(__clang__)
+#define ALWAYS_INLINE inline __attribute__((always_inline))
+#elif defined(_MSC_VER)
+#define ALWAYS_INLINE __forceinline
+#else
+#define ALWAYS_INLINE inline
 #endif
 
 #define U8MAX  0xff
@@ -51,6 +37,15 @@ inline auto sleep_ms = [](auto arg) {
 #define READ_PIPE_ERROR -5
 #define PROCESS_TIMEOUT -6
 #define PROCESS_WAIT_ERROR -7
+
+/* tailmapper error codes (for WM_TM_FATAL_ERROR) */
+#define TME_FATAL_ERROR_GENERIC 0
+#define TME_NO_TAILSCALE_SERVICE 1
+#define TME_WIN32_MESSAGE_QUEUE_FAILURE 2
+#define TME_TAILSCALE_CLIENT_UNAVAILABLE 3
+#define TME_CORRUPTED_EXE 4
+#define TME_CORRUPTED_GLOBAL_VARIABLE 5
+#define TME_TAILSCALE_STATUS_ERROR 6
 
 #define IP_PARSE_FAILED 0x80000000
 #define IP_FORMAT_IPV4 0x00000001
@@ -82,10 +77,17 @@ void __print(const char* s, ...);
     __error("[ERROR] " fmt, ##__VA_ARGS__)
 # define PRINT(fmt, ...) \
     __print("" fmt, ##__VA_ARGS__)
+# if defined TM_TRACE
+#  define TRACE(fmt, ...) \
+    __error("%s " __VA_OPT__(fmt), __func__ __VA_OPT__(, ##__VA_ARGS__))
+# else
+#  define TRACE(fmt, ...)
+# endif //TM_TRACE
 #else 
-# define log(fmt, ...)
-# define error(fmt, ...)
-# define print(fmt, ...)
+# define LOG(fmt, ...)
+# define ERROR(fmt, ...)
+# define PRINT(fmt, ...)
+# define TRACE(fmt, ...)
 #endif
 
 #ifndef _WINDOWS_
@@ -95,6 +97,50 @@ void __print(const char* s, ...);
 #define WM_APP 0x8000
 #define DWORD unsigned long
 #endif
+#define WM_APP_MAX 0xbfff
+
+typedef uint8_t u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
+typedef int8_t s8;
+typedef int16_t s16;
+typedef int32_t s32;
+typedef int64_t s64;
+typedef std::vector<std::string> strvec;
+
+using std::string;
+using std::vector;
+using std::map;
+using std::atomic;
+using sclock = std::chrono::system_clock;
+using time_point = std::chrono::time_point<sclock>;
+ALWAYS_INLINE auto to_ms(auto&& ...args) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::forward<decltype(args)>(args)...
+            ).count();
+};
+ALWAYS_INLINE auto sleep_ms(auto arg) {
+    return std::this_thread::sleep_for(std::chrono::milliseconds(arg));
+};
+template <typename T>
+ALWAYS_INLINE string wcstoas(T arg) {
+    if constexpr (std::is_same_v<T, wchar_t*>) {
+        auto n = wcstombs(0, arg, 0);
+        string out(n, 0);
+        wcstombs(out.data(), arg, n);
+        return out;
+    } else if constexpr (std::is_same_v<T, std::wstring>) {
+        if(arg.empty())
+            return {};
+        auto n = wcstombs(0, arg.c_str(), 0);
+        string out(n, 0);
+        wcstombs(out.data(), arg.c_str(), n);
+        return out;
+    } else {
+        static_assert(1, "Passed non-wide character string type to wcstoas");
+    }
+};
 
 constexpr u32 min_to_ms(u64 x) { return x * 60 * 1000; }
 constexpr u32 hour_to_ms(u64 x) { return x * 60 * 1000 * 60; }
@@ -115,6 +161,8 @@ constexpr u32 WM_TM_ENABLE_MAP = WM_APP + 2;
 constexpr u32 WM_TM_DISABLE_MAP = WM_APP + 3;
 
 /* A fatal error happened, crash the app */
+/* WPARAM is the error code */
+/* LPARAM is ignored */
 constexpr u32 WM_TM_FATAL_ERROR = WM_APP + 4;
 
 /* Prompt the user for tailscale login */
@@ -124,6 +172,15 @@ constexpr u32 WM_TM_LOGIN_PROMPT = WM_APP + 5;
 /* Tell the tailscale runner to start tailscale via `tailscale up` */
 /* LPARAM and WPARAM are ignored */
 constexpr u32 WM_TM_START_TAILSCALE = WM_APP + 6;
+
+/* Tell the application to quit */
+constexpr u32 WM_TM_CLOSE = WM_APP + 7;
+
+/* Tell the main thread that the runner thread is ready */
+constexpr u32 WM_TM_TS_THREAD_READY = WM_APP + 8;
+
+/* Tell the main thread that the packet mapping thread is ready */
+constexpr u32 WM_TM_PM_THREAD_READY = WM_APP + 9;
 
 typedef struct _IP {
     u32 flags;
@@ -206,16 +263,30 @@ typedef struct _GUIData {
 
 typedef struct _TailscaleData {
     time_point last_status_check;
-    bool status_refresh_ongoing;
+    time_point last_refresh_sent;
+    atomic<bool> status_refresh_ongoing;
     map<u16, Site> *site_map;
     TailscaleState state;
     map<string, Peer> peer_map;
     TailscaleRunnerState runner_thread_state;
 } TailscaleData;
 
+typedef struct _PacketMapData {
+} PacketMapData;
+
+typedef struct _Config {
+    string control_plane;
+    bool unattended;
+} Config;
+
 typedef struct _Global {
     string tailscale_path;
+    vector<string> tailscale_up_params;
+    string data_dir;
+    string config_path;
+
     HWND main_window;
+    atomic<bool> shutdown_event;
 
     /* tailscale runner thread */
     HANDLE ts_thread;
@@ -226,20 +297,23 @@ typedef struct _Global {
     DWORD pm_thread_id;
 
     /* gui thread */
-    bool gui_active;
-    bool gui_sleeping;
+    atomic<bool> gui_active;
+    atomic<bool> gui_sleeping;
     HANDLE gui_thread;
     HWND gui_window;
 
-    /* this is long lived, between guis */
+    /* long lived data, regardless of GUI state */
     GUIData gui;
     TailscaleData ts;
+    PacketMapData pm;
 
     /* double buffer for thread synchronizaiton */
     map<u16, Site> site_map_1;
     map<u16, Site> site_map_2;
 
     vector<Route> active_routes;
+
+    Config conf;
 } Global;
 
 string shell_error_to_string(s32 error_code);
@@ -251,7 +325,12 @@ string ip_to_str(IP ip);
 
 EmbeddedResource load_resource(s32 resource_id);
 
-inline u16 extract_site_id(IP& ip) {
+string read_entire_file(string absolute_path);
+string get_config_path();
+
+Config load_config(Global& g);
+
+ALWAYS_INLINE u16 extract_site_id(IP& ip) {
     /*
      *                 Site Id
      *                 |  IPv4 Address
@@ -268,7 +347,7 @@ inline u16 extract_site_id(IP& ip) {
     return 0;
 }
 
-inline IP local_ip(IP& ip) {
+ALWAYS_INLINE IP local_ip(IP& ip) {
     /*
      *  local ip is only valid in IPv6 since there is
      *  no defined local-remote relationship with 4via6
@@ -292,7 +371,7 @@ inline IP local_ip(IP& ip) {
 #undef _4VIA6_CONVERSION
 }
 
-inline IP remote_ip(IP& ip) {
+ALWAYS_INLINE IP remote_ip(IP& ip) {
     /*
      *  remote ip is only valid if it is IPv6, otherwise there
      *  is no defined local-remote relationship with 4via6
@@ -300,6 +379,55 @@ inline IP remote_ip(IP& ip) {
     if(ip.flags & IP_FORMAT_IPV6)
         return ip;
     return {};
+}
+
+ALWAYS_INLINE const char *tme_message(u64 tme) {
+    switch(tme) {
+        case TME_FATAL_ERROR_GENERIC: return "Generic Fatal Error Occurred";
+        case TME_NO_TAILSCALE_SERVICE: return "The tailscale service was not found";
+        case TME_WIN32_MESSAGE_QUEUE_FAILURE: return "The Win32 message queue failed to initialize";
+        case TME_TAILSCALE_CLIENT_UNAVAILABLE: return "The tailscale client was not found";
+        case TME_CORRUPTED_EXE: return "This executable is corrupted, reinstall to fix the error";
+        case TME_CORRUPTED_GLOBAL_VARIABLE: return "The global state was corrupted";
+        case TME_TAILSCALE_STATUS_ERROR: return "The tailscale status has produced an error";
+        default: return "An undefined fatal error has occurred";
+    }
+}
+
+inline void print_ip(IP ip) {
+    if(ip.flags & IP_PARSE_FAILED) {
+        printf("Invalid IP\n");
+    } else if(ip.flags & IP_FORMAT_IPV4) {
+        printf("Address: %d.%d.%d.%d\nPort: %d\nCIDR: %d\n",
+                ((ip.addr.ipv4 & 0xff000000) >> 24),
+                ((ip.addr.ipv4 & 0x00ff0000) >> 16),
+                ((ip.addr.ipv4 & 0x0000ff00) >> 8),
+                ((ip.addr.ipv4 & 0x000000ff)),
+                (ip.flags & IP_HAS_PORT) ? ip.port : 0,
+                (ip.flags & IP_HAS_PREFIX_LENGTH) ? ip.prefix_length : 0
+                );
+    } else {
+        printf("Address: %x%x:%x%x:%x%x:%x%x:%x%x:%x%x:%x%x:%x%x\nPort: %d\nCIDR: %d\n",
+                ip.addr.ipv6.u.byte[0],
+                ip.addr.ipv6.u.byte[1],
+                ip.addr.ipv6.u.byte[2],
+                ip.addr.ipv6.u.byte[3],
+                ip.addr.ipv6.u.byte[4],
+                ip.addr.ipv6.u.byte[5],
+                ip.addr.ipv6.u.byte[6],
+                ip.addr.ipv6.u.byte[7],
+                ip.addr.ipv6.u.byte[8],
+                ip.addr.ipv6.u.byte[9],
+                ip.addr.ipv6.u.byte[10],
+                ip.addr.ipv6.u.byte[11],
+                ip.addr.ipv6.u.byte[12],
+                ip.addr.ipv6.u.byte[13],
+                ip.addr.ipv6.u.byte[14],
+                ip.addr.ipv6.u.byte[15],
+                (ip.flags & IP_HAS_PORT) ? ip.port : 0,
+                (ip.flags & IP_HAS_PREFIX_LENGTH) ? ip.prefix_length : 0
+                );
+    }
 }
 
 #endif //_COMMON_HH_

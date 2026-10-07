@@ -28,11 +28,8 @@ typedef enum _TailnetError {
     TAILSCALE_STARTING_ERROR,
 } TailnetError;
 
-/* Perform startup checks, is tailscale on path, is account logged in? */
-TailnetError ts_startup_checks(Global& g);
-
 /* Runner thread to get tailscale stuffs from */
-unsigned long thread(void *);
+DWORD __stdcall thread(void *);
 
 s32 init(Global& g);
 

@@ -4,9 +4,11 @@
 #include <windns.h>
 #include <iphlpapi.h>
 #include <windows.h>
+#include <shlobj.h>
 #include "common.hh"
 #include <format>
 #include <stdarg.h>
+#include <json.hh>
 
 /*
  *  NOTE: Windows made a lot of dumb decisions about how integer types should be sized
@@ -15,6 +17,7 @@
  */
 
 unsigned long readPipe(void* _args);
+string get_login_url_reg();
 
 string shell_error_to_string(s32 error_code) {
     switch (error_code) {
@@ -211,6 +214,7 @@ unsigned long readPipe(void* _args) {
  */
 
 IP parse_ip(string ip_str) {
+    TRACE();
     NET_ADDRESS_INFO addr_info = {};
     USHORT port = 0;
     BYTE prefix_length = 0;
@@ -457,10 +461,10 @@ string ip_to_str(IP ip) {
         if(ip.flags & IP_HAS_PORT)
             port = ":" + to_string(ip.port);
 
-        base = to_string(bytes[0]) + "."
-                + to_string(bytes[1]) + "."
+        base = to_string(bytes[3]) + "."
                 + to_string(bytes[2]) + "."
-                + to_string(bytes[3]);
+                + to_string(bytes[1]) + "."
+                + to_string(bytes[0]);
 
         return base + cidr + port;
 
@@ -529,6 +533,100 @@ EmbeddedResource load_resource(s32 resource_id) {
         .size = size
     };
 }
+
+string get_config_path() {
+    TRACE();
+    PWSTR wpath = 0;
+    SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, 0, &wpath);
+    auto path = wcstoas(wpath);
+    path += "\\TailMapper";
+    return path;
+}
+
+/* Retrieve the LoginUrl field from the registry */
+string get_login_url_reg() {
+        DWORD type;
+        DWORD buf_size;
+        auto status = RegGetValue(
+                HKEY_LOCAL_MACHINE,
+                "SOFTWARE\\Tailscale IPN",
+                "LoginUrl",
+                0,
+                &type,
+                0, &buf_size
+                );
+        if(status != ERROR_SUCCESS)
+            return "";
+        if(type != RRF_RT_REG_SZ)
+            return "";
+        string value = string(buf_size, 0);
+        RegGetValue(
+                HKEY_LOCAL_MACHINE,
+                "SOFTWARE\\Tailscale IPN",
+                "LoginUrl",
+                0,
+                &type,
+                value.data(),
+                &buf_size
+                );
+        return value;
+}
+
+Config load_config(Global& g) {
+    TRACE();
+    using nlohmann::json;
+    Config out {};
+
+    try {
+        auto conf_str = read_entire_file(g.config_path);
+        auto _json = json::parse(conf_str);
+
+        /* Control Plane */
+        if(!_json.contains("control_plane") || !_json["control_plane"].is_string())
+            out.control_plane = get_login_url_reg();
+        else
+            out.control_plane = _json["control_plane"];
+
+        /* Unattended */
+        if(!_json.contains("unattended") || !_json["unattended"].is_boolean())
+            out.unattended = false;
+        else
+            out.unattended = _json["unattended"];
+
+    } catch(std::exception& e) {
+        out.control_plane = get_login_url_reg();
+        out.unattended = false;
+    }
+    if(out.control_plane.empty())
+        out.control_plane = "https://controlplane.tailscale.com";
+    return out;
+}
+
+string read_entire_file(string path) {
+    auto file = CreateFileA(
+            path.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            NULL, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            NULL
+            );
+    if(!file)
+        throw std::runtime_error("Could not open file");
+    LARGE_INTEGER file_size;
+    if(!GetFileSizeEx(file, &file_size)) {
+        CloseHandle(file);
+        throw std::runtime_error("Could not get file size");
+    }
+    DWORD bytes_read;
+    string content(file_size.QuadPart, 0);
+    if(!ReadFile(file, content.data(), (DWORD)file_size.QuadPart, &bytes_read, 0)) {
+        CloseHandle(file);
+        throw std::runtime_error("Could not read file");
+    }
+    return content;
+}
+
 void __error(const char* s, ...) {
     va_list ap;
     va_start(ap, s);

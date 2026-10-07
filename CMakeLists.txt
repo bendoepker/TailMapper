@@ -29,6 +29,7 @@ add_executable(tailmapper
 target_compile_definitions(tailmapper PRIVATE
     _CRT_SECURE_NO_WARNINGS
     $<$<CONFIG:Debug>:TM_DEBUG>
+    TM_TRACE
 )
 
 target_include_directories(tailmapper PRIVATE

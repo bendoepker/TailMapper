@@ -7,6 +7,9 @@
 #include "gui.hh"
 
 void render_site_dialog(Global *g);
+void draw_toolbar(Global *g);
+/* Taken from https://github.com/ocornut/imgui/issues/707#issuecomment-4107169777 with love */
+void SetupImGuiDarkStyle();
 
 static void glfw_error_callback(int error, const char* description)
 {
@@ -14,9 +17,17 @@ static void glfw_error_callback(int error, const char* description)
 }
 
 ULONG UI::Thread(void *_g) {
+    TRACE("%s", "GUI Thread Initialized");
     Global *g = (Global*)_g;
-    if(!g)
+    if(!g) {
+        PostMessage(g->main_window, WM_TM_FATAL_ERROR, TME_CORRUPTED_GLOBAL_VARIABLE, 0);
         return 1;
+    }
+
+    /* prevent a weird reentrancy bug */
+    if(g->shutdown_event)
+        return 1;
+
     Window(g);
 
     g->gui_thread = 0;
@@ -67,16 +78,26 @@ void UI::Window(Global *g) {
             20.0f,
             &config
             );
-    if(!aptos)
+    if(!aptos) {
+        PostMessage(g->main_window, WM_TM_FATAL_ERROR, TME_CORRUPTED_EXE, 0);
         return;
+    }
 
     ImGui::StyleColorsDark();
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
+    SetupImGuiDarkStyle();
+
     while (!glfwWindowShouldClose(window))
     {
+        if(g->shutdown_event) {
+            TRACE("%s", "Received shutdown event");
+            glfwSetWindowShouldClose(window, 1);
+            break;
+        }
+
         glfwPollEvents();
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -143,17 +164,21 @@ void UI::Frame(Global *g) {
 
     ImGui::Begin("##TailMapperRoot", nullptr, flags);
 
+    draw_toolbar(g);
+
     SitesTable(g);
 
     ImGui::End();
 }
 
 void UI::MappingsTable(Global *g) {
+    /* These are the activated mappings */
     
 }
 
 void UI::SitesTable(Global *g) {
-    ImGui::Text("Sites");
+    /* This is the available sites on the tailnet */
+    ImGui::Text("Sites (%llu)", g->gui.site_map->size());
     ImGui::Separator();
     ImGui::Spacing();
 
@@ -185,19 +210,19 @@ void UI::SitesTable(Global *g) {
 
         ImGui::TableHeadersRow();
 
-        for (const auto& [site_id, site] : *g->gui.site_map)
+        for (const auto& [site_id, site] : *(g->gui.site_map))
         {
             ImGui::TableNextRow();
 
-            // Site ID
+            /* site id */
             ImGui::TableSetColumnIndex(0);
 
-            ImGui::Text("%u", site.id);
+            ImGui::Text("%u", site_id);
 
-            // Site Name
+            /* site name */
             ImGui::TableSetColumnIndex(1);
 
-            ImGui::PushID(static_cast<int>(site.id));
+            ImGui::PushID(static_cast<int>(site_id));
 
             if (ImGui::Selectable(
                     site.name.c_str(),
@@ -269,4 +294,61 @@ void render_site_dialog(Global *g) {
 
         ImGui::EndPopup();
     }
+}
+
+void draw_toolbar(Global *g) {
+    constexpr float toolbar_height = 36.0f;
+
+    ImGui::BeginChild(
+            "##toolbar",
+            ImVec2(0.0f, toolbar_height)
+            );
+
+    using namespace std::chrono_literals;
+    auto refresh_disabled = g->ts.last_refresh_sent > (sclock::now() - 5s);
+    ImGui::BeginDisabled(refresh_disabled);
+    if(ImGui::Button("Refresh Available Sites")) {
+        PostMessage(g->main_window, WM_TM_REFRESH, 0, 0);
+    }
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+
+    if(ImGui::Button("Submit Issue")) {
+        ShellExecute(0, "open", "https://github.com/bendoepker/TailMapper/issues", 0, 0, SW_SHOWNORMAL);
+    }
+    if(ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+        ImGui::SetTooltip("https://github.com/bendoepker/TailMapper/issues");
+
+    ImGui::EndChild();
+}
+
+void SetupImGuiDarkStyle()
+{
+    ImGui::StyleColorsDark();
+
+    ImGuiStyle& style = ImGui::GetStyle();
+
+    // --- 1. Sizing and Spacing (Modern & Tight) ---
+    style.WindowPadding = ImVec2(8.0f, 8.0f);
+    style.FramePadding = ImVec2(5.0f, 3.0f);
+    style.CellPadding = ImVec2(6.0f, 4.0f);
+    style.ItemSpacing = ImVec2(6.0f, 4.0f);
+    style.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
+    style.ScrollbarSize = 13.0f;
+    style.GrabMinSize = 10.0f;
+
+    // --- 2. Borders & Rounding ---
+    style.WindowBorderSize = 1.0f;
+    style.ChildBorderSize = 1.0f;
+    style.PopupBorderSize = 1.0f;
+    style.FrameBorderSize = 1.0f;
+
+    style.WindowRounding = 4.0f;
+    style.ChildRounding = 3.0f;
+    style.FrameRounding = 3.0f;
+    style.PopupRounding = 3.0f;
+    style.ScrollbarRounding = 9.0f;
+    style.GrabRounding = 3.0f;
+    style.TabRounding = 3.0f;
 }

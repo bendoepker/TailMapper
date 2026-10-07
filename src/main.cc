@@ -21,10 +21,11 @@ s32 init_gui_data(Global& g);
 s32 init_global_data(Global& g);
 void post_ts_message(Global& g, UINT msg, WPARAM wParam, LPARAM lParam);
 void post_pm_message(Global& g, UINT msg, WPARAM wParam, LPARAM lPARAM);
-LRESULT CALLBACK handle_custom_messages(UINT msg, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK handle_custom_messages(Global& g, UINT msg, WPARAM wParam, LPARAM lParam);
 void clean_resources(Global& g);
 
 int main(s32 argc, char **argv, char **envp) {
+    TRACE();
     return WinMain(
             GetModuleHandleW(nullptr),
             nullptr,
@@ -34,6 +35,7 @@ int main(s32 argc, char **argv, char **envp) {
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    TRACE();
     HANDLE instance_mutex = CreateMutexW(
             nullptr,
             FALSE,
@@ -56,6 +58,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 1;
     if(TS::init(g))
         return 1;
+
+    TRACE("%s", "Data Initialized");
 
     WNDCLASSEX wc = { 0 };
     wc.cbSize = sizeof(WNDCLASSEX);
@@ -81,12 +85,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     add_tray_icon(hWnd);
 
-    g.ts_thread = CreateThread(NULL, 0, TS::thread, (void*)&g, 0, 0);
+    g.ts_thread = CreateThread(NULL, 0, TS::thread, (void*)&g, 0, &g.ts_thread_id);
     if(!g.ts_thread) {
         ERR("Failed to initialize TS thread");
         return 1;
     }
 
+    TRACE("%s", "Threads Initialized");
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
@@ -111,8 +116,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         g = reinterpret_cast<Global*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
     }
 
-    if(message > WM_APP)
-        return handle_custom_messages(message, wParam, lParam);
+    if(message > WM_APP && message < WM_APP_MAX)
+        return handle_custom_messages(*g, message, wParam, lParam);
 
     switch (message) {
 
@@ -126,9 +131,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             HMENU hMenu = CreatePopupMenu();
             AppendMenu(hMenu, MF_STRING, ID_TRAY_EXIT, "Exit TailMapper");
 
-            SetForegroundWindow(hWnd); 
+            SetForegroundWindow(hWnd);
 
-            TrackPopupMenu(hMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, curPoint.x, curPoint.y, 0, hWnd, NULL);
+            auto command = TrackPopupMenu(hMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RETURNCMD, curPoint.x, curPoint.y, 0, hWnd, NULL);
+
+            PostMessage(hWnd, WM_NULL, 0, 0);
+
+            if(command == ID_TRAY_EXIT) {
+                TRACE("%s", "\"Exit Tailmapper\" pressed");
+                DestroyWindow(hWnd);
+            }
+
             DestroyMenu(hMenu);
             break;
         }
@@ -140,13 +153,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         }
         break;
 
-    case WM_COMMAND:
-        if (LOWORD(wParam) == ID_TRAY_EXIT) {
-            DestroyWindow(hWnd);
-        }
-        break;
-
     case WM_DESTROY:
+        clean_resources(*g);
         PostQuitMessage(0);
         break;
 
@@ -161,7 +169,7 @@ void add_tray_icon(HWND hWnd) {
     nid.hWnd = hWnd;
     nid.uID = TRAY_ICON_ID;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    nid.uCallbackMessage = WM_TRAYICON; // Custom message sent to WndProc
+    nid.uCallbackMessage = WM_TRAYICON;
 
     nid.hIcon = static_cast<HICON>(
             LoadImageW(
@@ -208,45 +216,10 @@ cont:
     }
 }
 
-const char* ip_test_vals2[] = {
-    /* IPv4 */
-    "192.168.1.1",
-    "192.168.1.1:80",
-    "10.0.0.1:443",
-    "127.0.0.1:1",
-    "192.168.21.209:5201",
-    "10.20.30.40:65535",
-
-    "192.168.1.0/24",
-    "10.0.0.0/8",
-    "172.16.0.0/12",
-    "192.168.21.209/32",
-    "0.0.0.0/0",
-
-    /* IPv6 */
-    "::1",
-    "::",
-    "2001:db8::1",
-    "fd7a:115c:a1e0::1",
-    "fe80::1234:5678",
-    "2001:db8:1234:5678:9abc:def0:1234:5678",
-
-    "[::1]:80",
-    "[2001:db8::1]:443",
-    "[fd7a:115c:a1e0::1234]:502",
-    "[fe80::1234:5678]:65535",
-    "[2001:db8:1234:5678:9abc:def0:1234:5678]:1",
-
-    "::/0",
-    "::1/128",
-    "2001:db8::/32",
-    "fd7a:115c:a1e0::/48",
-    "fe80::/10",
-    "2001:db8:1234:5678::/64",
-};
-
 s32 init_gui_data(Global& g) {
+    TRACE();
     g.gui.font = load_resource(IDR_FONT_APTOS);
+    g.gui_sleeping = true;
     if(g.gui.font.size == 0)
         return 1;
 
@@ -254,23 +227,27 @@ s32 init_gui_data(Global& g) {
 }
 
 s32 init_global_data(Global& g) {
+    TRACE();
     g.site_map_1 = map<u16, Site>{};
     g.site_map_2 = map<u16, Site>{};
+    g.shutdown_event = false;
+    g.config_path = get_config_path();
+    g.conf = load_config(g);
 
     return 0;
 }
 
 void post_ts_message(Global& g, UINT msg, WPARAM wParam, LPARAM lParam) {
     if(g.ts_thread_id == 0) {
-        /* If the message queue isn't ready put the message back through the queue */
-        PostMessage(g.main_window, msg, wParam, lParam);
+        TRACE("%s%x%s%llx%s%llx%s", "Attempted to post message: '", msg, "' with params: wParam(", wParam, ") lParam(", lParam, ")");
+        return;
     }
     PostThreadMessage(g.ts_thread_id, msg, wParam, lParam);
 }
 
 void post_pm_message(Global& g, UINT msg, WPARAM wParam, LPARAM lParam) {
     if(g.pm_thread_id == 0 ) {
-        PostMessage(g.main_window, msg, wParam, lParam);
+        return;
     }
     PostThreadMessage(g.pm_thread_id, msg, wParam, lParam);
 }
@@ -278,6 +255,7 @@ void post_pm_message(Global& g, UINT msg, WPARAM wParam, LPARAM lParam) {
 LRESULT CALLBACK handle_custom_messages(Global& g, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch(msg) {
         case WM_TM_REFRESH:
+            g.ts.last_refresh_sent = sclock::now();
             post_ts_message(g, msg, wParam, lParam);
             return 0;
         case WM_TM_ENABLE_MAP:
@@ -286,14 +264,26 @@ LRESULT CALLBACK handle_custom_messages(Global& g, UINT msg, WPARAM wParam, LPAR
         case WM_TM_DISABLE_MAP:
             post_pm_message(g, msg, 0, 0);
         case WM_TM_FATAL_ERROR:
+            ERR("%s", tme_message(wParam));
+            if(wParam == TME_FATAL_ERROR_GENERIC)
+                wParam = -1;
             clean_resources(g);
-            PostQuitMessage(1);
-            return 1;
+            PostQuitMessage(wParam);
+            return wParam;
         case WM_TM_LOGIN_PROMPT:
             /* TODO: */
             return 1;
         case WM_TM_START_TAILSCALE:
             post_ts_message(g, msg, 0, 0);
+            return 0;
+        case WM_TM_CLOSE:
+            clean_resources(g);
+            PostQuitMessage(0);
+            return 0;
+        case WM_TM_TS_THREAD_READY:
+            post_ts_message(g, WM_TM_REFRESH, 0, 0);
+            return 0;
+        case WM_TM_PM_THREAD_READY:
             return 0;
         default:
             return 1;
@@ -301,5 +291,35 @@ LRESULT CALLBACK handle_custom_messages(Global& g, UINT msg, WPARAM wParam, LPAR
 }
 
 void clean_resources(Global& g) {
-    /* TODO: */
+    /* signal the threads to close, they get 2 seconds of grace
+     * period before they are forcefully closed */
+    TRACE();
+    g.shutdown_event = true;
+    if(g.gui_thread) {
+        if(WaitForSingleObject(g.gui_thread, 2000) == WAIT_TIMEOUT) {
+            ERR("%s", "GUI Thread failed to close in time, forcefully closing it");
+            TerminateThread(g.gui_thread, 1);
+        }
+        CloseHandle(g.gui_thread);
+        g.gui_thread = 0;
+    }
+    TRACE("%s", "GUI Thread closed");
+    if(g.ts_thread) {
+        if(WaitForSingleObject(g.ts_thread, 2000) == WAIT_TIMEOUT) {
+            ERR("%s", "Tailscale runner thread failed to close in time, forcefully closing it");
+            TerminateThread(g.ts_thread, 1);
+        }
+        CloseHandle(g.ts_thread);
+        g.ts_thread = 0;
+    }
+    TRACE("%s", "Tailscale runner thread closed");
+    if(g.pm_thread) {
+        if(WaitForSingleObject(g.pm_thread, 2000) == WAIT_TIMEOUT) {
+            ERR("%s", "Packet mapping thread failed to close in time, forcefully closing it");
+            TerminateThread(g.pm_thread, 1);
+        }
+        CloseHandle(g.pm_thread);
+        g.pm_thread = 0;
+    }
+    TRACE("%s", "Packet mapping thread closed");
 }
