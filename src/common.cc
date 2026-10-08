@@ -1,4 +1,3 @@
-#include <stdio.h>
 #include <winsock2.h>
 #include <ws2ipdef.h>
 #include <windns.h>
@@ -6,7 +5,6 @@
 #include <windows.h>
 #include <shlobj.h>
 #include "common.hh"
-#include <format>
 #include <stdarg.h>
 #include <json.hh>
 
@@ -18,6 +16,8 @@
 
 unsigned long readPipe(void* _args);
 string get_login_url_reg();
+bool _match_ipv4(u8 *test_bytes, u8 *ref_bytes, u8 *filter);
+bool _match_ipv6(u8 *test_bytes, u8 *ref_bytes, u8 *filter);
 
 string shell_error_to_string(s32 error_code) {
     switch (error_code) {
@@ -49,7 +49,7 @@ struct readPipeParams {
     string output;
 };
 
-s32 shell_exec(string program, strvec args, ShellOutput& output, s32 timeout_secs) {
+s32 shell_exec(string program, vector<string> args, ShellOutput& output, s32 timeout_secs) {
     STARTUPINFO si;
     PROCESS_INFORMATION pi;
     SECURITY_ATTRIBUTES child_stdout_sa;
@@ -643,4 +643,106 @@ void __print(const char* s, ...) {
     va_end(ap);
     fprintf(stdout, "\n");
     fflush(stdout);
+}
+
+void RouteMap::add_route(Route& r) {
+    if(!(r.local_ip.flags & IP_FORMAT_IPV4) || !(r.remote_ip.flags & IP_FORMAT_IPV6))
+        return;
+    auto lsid = sIP(r.local_ip);
+    auto rsid = sIP(r.remote_ip);
+    for(auto& v : this->_routes) {
+        if(v.first == lsid || v.second == rsid) return;
+    }
+    this->_routes.push_back({lsid, rsid});
+    PRINT("Adding route %s : %s", ip_to_str(r.local_ip).c_str(), ip_to_str(r.remote_ip).c_str());
+}
+
+void RouteMap::remove_route(Route& r) {
+    /* the ip address is wrong, just ignore it */
+    if(!(r.local_ip.flags & IP_FORMAT_IPV4) || !(r.remote_ip.flags & IP_FORMAT_IPV6))
+        return;
+    auto lsid = sIP(r.local_ip);
+    auto rsid = sIP(r.remote_ip);
+    for(auto i = 0; i < this->_routes.size(); i++) {
+        if(this->_routes[i].first == lsid && this->_routes[i].second == rsid) {
+            this->_routes.erase(this->_routes.begin() + i);
+            PRINT("Removing route %s : %s", ip_to_str(r.local_ip).c_str(), ip_to_str(r.remote_ip).c_str());
+        }
+    }
+}
+
+bool RouteMap::route_in_map(Route& r) {
+    auto lsid = sIP(r.local_ip);
+    auto rsid = sIP(r.remote_ip);
+    for(auto& v : this->_routes) {
+        if(v.first == lsid || v.second == rsid) {
+            return true;
+        }
+    }
+    return false;
+}
+
+string RouteMap::get_inbound_filter() {
+    /* Get filter for inbound requests (IPv6 addrs that should be converted to IPv4) */
+    /*
+     *  (remoteAddr >= [min_ip] and remoteAddr <= [max_ip])
+     */
+    vector<string> rules {};
+    for(auto &route : this->_routes) {
+        rules.push_back("(remoteAddr >= "
+                + route.second.min_ip()
+                + " and remoteAddr <="
+                + route.second.max_ip()
+                + ")");
+    }
+    return join_strs(" or ", rules);
+}
+
+string RouteMap::get_outbound_filter() {
+    /* Get filter for outbound requests (IPv4 addrs that should be converted to IPv6) */
+    /*
+     *  (remoteAddr >= [min_ip] and remoteAddr <= [max_ip])
+     */
+    vector<string> rules {};
+    for(auto &route : this->_routes) {
+        rules.push_back("(remoteAddr >= "
+                + route.first.min_ip()
+                + " and remoteAddr <="
+                + route.first.max_ip()
+                + ")");
+    }
+    return join_strs(" or ", rules);
+}
+
+Common::IPAddr RouteMap::get_inbound_mapping(u8 *addr) {
+    /* inbound addresses not being ipv6 is a hard error, it can just crash */
+    return {.version = 4, .addr = {addr[12], addr[13], addr[14], addr[15]}};
+}
+
+Common::IPAddr RouteMap::get_outbound_mapping(u8 *addr) {
+    Common::IPAddr out = {};
+    for(auto& r : this->_routes) {
+        if(r.first.match(addr, 4)) {
+            /*
+             *  A match is found, map in the correct parts of the addresses as such:
+             *
+             *  xx:xx:xx:xx:yy:yy:zz:zz
+             *
+             *  xx:xx:xx:xx -> static prefix set by tailscale
+             *  yy:yy -> 0:site_id set by tailscale
+             *  zz:zz -> ipv4 addr inset in ipv6 addr
+             */
+            /* Copy the first half quick fast style */
+            ((u64*)out.addr)[0] = ((u64*)r.second.addr)[0];
+
+            /* Copy the third quarter quickish fastish style */
+            ((u32*)out.addr)[2] = ((u32*)r.second.addr)[2];
+
+            /* repeat for the addr map */
+            ((u32*)out.addr)[3] = ((u32*)addr)[0];
+            out.version = 6;
+            break;
+        }
+    }
+    return out;
 }

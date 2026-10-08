@@ -5,18 +5,24 @@
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 #include "gui.hh"
+#include "common.hh"
 
 void render_site_dialog(Global *g);
 void draw_toolbar(Global *g);
+void draw_available_routes_table(Global *g);
 /* Taken from https://github.com/ocornut/imgui/issues/707#issuecomment-4107169777 with love */
-void SetupImGuiDarkStyle();
+void imgui_dark_style();
+void sites_table(Global *g);
+void mappings_table(Global *g);
+void window(Global *g);
+void frame(Global *g);
 
 static void glfw_error_callback(int error, const char* description)
 {
     std::fprintf(stderr, "GLFW Error %d: %s\n", error, description);
 }
 
-ULONG UI::Thread(void *_g) {
+ULONG UI::thread(void *_g) {
     TRACE("%s", "GUI Thread Initialized");
     Global *g = (Global*)_g;
     if(!g) {
@@ -28,14 +34,14 @@ ULONG UI::Thread(void *_g) {
     if(g->shutdown_event)
         return 1;
 
-    Window(g);
+    window(g);
 
     g->gui_thread = 0;
     g->gui_active = false;
     return 0;
 }
 
-void UI::Window(Global *g) {
+void window(Global *g) {
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit())
         return;
@@ -88,7 +94,7 @@ void UI::Window(Global *g) {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
 
-    SetupImGuiDarkStyle();
+    imgui_dark_style();
 
     while (!glfwWindowShouldClose(window))
     {
@@ -109,7 +115,7 @@ void UI::Window(Global *g) {
         g->gui_sleeping = false;
         ImGui::NewFrame();
 
-        UI::Frame(g);
+        frame(g);
 
         ImGui::Render();
         g->gui_sleeping = true;
@@ -148,7 +154,7 @@ void UI::Window(Global *g) {
     return;
 }
 
-void UI::Frame(Global *g) {
+void frame(Global *g) {
     const ImGuiViewport *viewport = ImGui::GetMainViewport();
 
     ImGui::SetNextWindowPos(viewport->WorkPos);
@@ -166,17 +172,17 @@ void UI::Frame(Global *g) {
 
     draw_toolbar(g);
 
-    SitesTable(g);
+    sites_table(g);
 
     ImGui::End();
 }
 
-void UI::MappingsTable(Global *g) {
+void mappings_table(Global *g) {
     /* These are the activated mappings */
     
 }
 
-void UI::SitesTable(Global *g) {
+void sites_table(Global *g) {
     /* This is the available sites on the tailnet */
     ImGui::Text("Sites (%llu)", g->gui.site_map->size());
     ImGui::Separator();
@@ -280,6 +286,8 @@ void render_site_dialog(Global *g) {
             ImGui::SameLine(120.0f);
             ImGui::TextUnformatted(site_ip.c_str());
 
+            draw_available_routes_table(g);
+
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::Spacing();
@@ -323,7 +331,71 @@ void draw_toolbar(Global *g) {
     ImGui::EndChild();
 }
 
-void SetupImGuiDarkStyle()
+void draw_available_routes_table(Global *g) {
+    if(ImGui::BeginTable("Advertised Routes", 3)) {
+        ImGui::TableSetupColumn(
+            "Local Subnet",
+            ImGuiTableColumnFlags_WidthFixed,
+            240.0f
+        );
+
+        ImGui::TableSetupColumn(
+            "Remote Subnet",
+            ImGuiTableColumnFlags_WidthStretch
+        );
+
+        ImGui::TableSetupColumn(
+            "",
+            ImGuiTableColumnFlags_WidthStretch
+        );
+
+        ImGui::TableHeadersRow();
+
+        auto& v = (*g->gui.site_map)[g->gui.selected_site].advertised_routes;
+        for (auto i = 0; i < v.size(); i++)
+        {
+            ImGui::TableNextRow();
+
+            ImGui::TableSetColumnIndex(0);
+
+            ImGui::Text("%s", ip_to_str(v[i].local_ip).c_str());
+
+            ImGui::TableSetColumnIndex(1);
+
+            ImGui::Text("%s", ip_to_str(v[i].remote_ip).c_str());
+
+            ImGui::TableSetColumnIndex(2);
+
+            ImGui::PushID(i);
+
+            bool added = g->rmap.route_in_map(v[i]);
+
+            ImGui::BeginDisabled(added);
+                if(ImGui::Button("Add to map")) {
+                    g->rmap.add_route(v[i]);
+                }
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+
+            ImGui::BeginDisabled(!added);
+                ImGui::PushStyleColor(ImGuiCol_Button, (ImVec4)ImColor(255, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, (ImVec4)ImColor(200, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, (ImVec4)ImColor(150, 0, 0));
+                if(ImGui::Button("Remove from map")) {
+                    g->rmap.remove_route(v[i]);
+                }
+                ImGui::PopStyleColor(3);
+            ImGui::EndDisabled();
+
+            ImGui::PopID();
+        }
+
+        ImGui::EndTable();
+    }
+}
+
+void imgui_dark_style()
 {
     ImGui::StyleColorsDark();
 

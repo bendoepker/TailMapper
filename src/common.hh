@@ -1,14 +1,16 @@
 #ifndef _COMMON_HH_
 #define _COMMON_HH_
 
-#include <stdint.h>
-#include <string>
-#include <vector>
+#include <cassert>
 #include <chrono>
-#include <thread>
-#include <type_traits>
 #include <cstdlib>
 #include <map>
+#include <stdint.h>
+#include <string>
+#include <thread>
+#include <type_traits>
+#include <vector>
+#include <windivert.h>
 
 #if !defined(__BYTE_ORDER__) || !(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
 /* Only supporting little endian system because of the way IPv6 addresses are stored */
@@ -107,12 +109,12 @@ typedef int8_t s8;
 typedef int16_t s16;
 typedef int32_t s32;
 typedef int64_t s64;
-typedef std::vector<std::string> strvec;
 
+using std::atomic;
+using std::map;
+using std::pair;
 using std::string;
 using std::vector;
-using std::map;
-using std::atomic;
 using sclock = std::chrono::system_clock;
 using time_point = std::chrono::time_point<sclock>;
 ALWAYS_INLINE auto to_ms(auto&& ...args) {
@@ -182,6 +184,15 @@ constexpr u32 WM_TM_TS_THREAD_READY = WM_APP + 8;
 /* Tell the main thread that the packet mapping thread is ready */
 constexpr u32 WM_TM_PM_THREAD_READY = WM_APP + 9;
 
+/* Disable all packet maps */
+/* LPARAM and WPARAM are ignored */
+constexpr u32 WM_TM_DISABLE_ALL_MAPS = WM_APP + 10;
+
+/* Tell the packet mapping thread to recalculate it's filters */
+constexpr u32 WM_TM_RECALC_FILTERS = WM_APP + 11;
+
+typedef enum _IPVersion { V4, V6 } IPVersion;
+
 typedef struct _IP {
     u32 flags;
     u16 prefix_length;
@@ -198,6 +209,20 @@ typedef struct _IP {
     string str;
 } IP;
 
+/* This is probably unnecessary unless I want to reinvent windiver */
+/* hmmm... that sounds fun though */
+// class IPRange {
+// public:
+//     IPRange() = delete;
+//     IPRange(IP ip);
+//     bool match(u8* bytes, IPVersion ver);
+// private:
+//     IPVersion version;
+//     u8 _bytes[16];      /* Base IP */
+//     u8 _filter[16];     /* CIDR Mask */
+//     bool (*_match)(u8 *bytes, u8 *_bytes, u8 *filter);
+// };
+
 typedef struct _Route {
     u16 site_id;
     IP local_ip;
@@ -210,6 +235,187 @@ typedef struct _Site {
     IP ip;
     vector<Route> advertised_routes;
 } Site;
+
+class sIP {
+public:
+    /* simplified IP structure */
+    /* no invalid ips allowed here */
+    sIP() = delete;
+    sIP(IP& ip) {
+        assert(!(ip.flags & IP_PARSE_FAILED) && "Invalid IP sent to _sIP()");
+        if((ip.flags & IP_FORMAT_IPV4) == IP_FORMAT_IPV4) {
+            this->addr[0] = (ip.addr.ipv4 & 0xff000000) >> 24;
+            this->addr[1] = (ip.addr.ipv4 & 0x00ff0000) >> 16;
+            this->addr[2] = (ip.addr.ipv4 & 0x0000ff00) >> 8;
+            this->addr[3] = (ip.addr.ipv4 & 0x000000ff);
+            s32 tmp = ip.prefix_length;
+            if(tmp > 32) tmp = 32;
+
+            memset(this->mask, 0, 16);
+            for(auto i = 0; i < 4; i++) {
+                /* translate the cidr suffix to a bitmask */
+                if(tmp >= 8) {
+                    this->mask[i] = 0xff;
+                    tmp -= 8;
+                } else {
+                    this->mask[i] = (u8)(0xff << (8 - tmp));
+                    tmp = 0;
+                }
+            }
+
+            this->_match = [](u8 *tb, u8 *rb, u8 *filter) {
+                return (*((u32*)tb) & *((u32*)filter))
+                    == (*((u32*)rb) & *((u32*)filter));
+            };
+
+            this->version = 4;
+
+        } else {
+            for(auto i = 0; i < 16; i++)
+                this->addr[i] = ip.addr.ipv6.u.byte[i];
+            s32 tmp = ip.prefix_length;
+            if(tmp > 128) tmp = 128;
+
+            memset(this->mask, 0, 16);
+            for(auto i = 0; i < 16; i++) {
+                /* translate the cidr suffix to a bitmask */
+                if(tmp >= 8) {
+                    this->mask[i] = 0xff;
+                    tmp -= 8;
+                } else {
+                    this->mask[i] = (u8)(0xff << (8 - tmp));
+                    tmp = 0;
+                }
+            }
+
+            this->_match = [](u8 *tb, u8 *rb, u8 *filter) {
+                return (
+                    (((u64*)tb)[0] & ((u64*)filter)[0])
+                        == (((u64*)rb)[0] & ((u64*)filter)[0])
+                    && (((u64*)tb)[1] & ((u64*)filter)[1])
+                        == (((u64*)rb)[1] & ((u64*)filter)[1])
+                );
+            };
+
+            this->version = 6;
+        }
+    }
+
+    string min_ip() {
+        u8 out[16] = {};
+        auto i_max = this->version == 4 ? 4 : 16;
+        for(auto i = 0; i < i_max; i++)
+            out[i] = (this->addr[i] & this->mask[i]);
+        if(this->version == 4) {
+            return std::format("{}.{}.{}.{}", out[0], out[1], out[2], out[3]);
+        } else {
+            return std::format("{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}"
+                               "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
+                        out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7],
+                        out[8], out[9], out[10], out[11], out[12], out[13], out[14], out[15]
+                    );
+        }
+
+    }
+
+    string max_ip() {
+        u8 out[16] = {};
+        auto i_max = this->version == 4 ? 4 : 16;
+        for(auto i = 0; i < i_max; i++)
+            out[i] = (this->addr[i] & this->mask[i]) | (this->mask[i] ^ 0xff);
+        if(this->version == 4) {
+            return std::format("{}.{}.{}.{}", out[0], out[1], out[2], out[3]);
+        } else {
+            return std::format("{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}"
+                               "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
+                        out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7],
+                        out[8], out[9], out[10], out[11], out[12], out[13], out[14], out[15]
+                    );
+        }
+    }
+
+    bool operator==(const sIP other) {
+        if(this->version != other.version)
+            return false;
+
+        if(this->version == 4) {
+            for(auto i = 0; i < 4; i++) {
+                if((this->addr[i] != other.addr[i])
+                    || (this->mask[i] != other.mask[i]))
+                    return false;
+            }
+        } else {
+            for(auto i = 0; i < 16; i++) {
+                if((this->addr[i] != other.addr[i])
+                    || (this->mask[i] != other.mask[i]))
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    string str() const {
+        auto out = this->addr;
+        if(this->version == 4) {
+            return std::format("IPV{} {}.{}.{}.{}", this->version, out[0], out[1], out[2], out[3]);
+        } else {
+            return std::format("IPV{} {:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}"
+                               "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}", this->version,
+                        out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7],
+                        out[8], out[9], out[10], out[11], out[12], out[13], out[14], out[15]
+                    );
+        }
+    }
+
+    bool match(u8 *bytes, u32 version) {
+        if(version != this->version)
+            return false;
+        return this->_match(bytes, this->addr, this->mask);
+    }
+
+    u32 version;
+    u8 addr[16];
+    u8 mask[16];
+    bool (*_match)(u8 *tb, u8 *rb, u8 *filter);
+};
+
+/* This is really annoying, but once again windows has poluted
+ * the global namespace... really though, shame on you windows
+ * devs for windows.h */
+namespace Common {
+typedef struct _IPAddr {
+    u32 version;
+    u8 addr[16];
+} IPAddr;
+}
+
+class RouteMap {
+public:
+    /*
+     *      192.168.10.0/24 <-> fd7a:115c:a1e0:b1a:0:1:c0a8:0a00/120
+     *
+     *      RouteMap rm {{}};
+     *      auto addr = rm.local[fd7a:115c:a1e0:b1a:0:1:c0a8:0a21]
+     *      // addr == 192.168.10.21
+     *      auto addr = rm.remote[192.168.10.21]
+     *      // addr == fd7a:115c:a1e0:b1a:0:1:c0a8:0a21
+     */
+    RouteMap() = default;
+    void add_route(Route& r);
+    void remove_route(Route& r);
+    bool route_in_map(Route& r);
+    string get_outbound_filter();
+    string get_inbound_filter();
+
+    /* Get the IPv4 equivalent to an IPv6 addr */
+    Common::IPAddr get_inbound_mapping(u8 *addr);
+
+    /* Get the IPv6 equivalent to an IPv4 addr */
+    Common::IPAddr get_outbound_mapping(u8 *addr);
+
+    /* .first == local IP && .second == remote IP */
+    vector<pair<sIP, sIP>> _routes;
+};
 
 typedef struct _Peer {
     string id;
@@ -272,6 +478,15 @@ typedef struct _TailscaleData {
 } TailscaleData;
 
 typedef struct _PacketMapData {
+    HANDLE wd_handle;
+    atomic<bool> working;
+    string filter;
+    vector<string> inbound_rules, outbound_rules;
+
+    /* working data fields */
+    OVERLAPPED ov;
+    WINDIVERT_ADDRESS addr;
+    UINT packet_len;
 } PacketMapData;
 
 typedef struct _Config {
@@ -311,13 +526,13 @@ typedef struct _Global {
     map<u16, Site> site_map_1;
     map<u16, Site> site_map_2;
 
-    vector<Route> active_routes;
+    RouteMap rmap;
 
     Config conf;
 } Global;
 
 string shell_error_to_string(s32 error_code);
-s32 shell_exec(string program, strvec args, ShellOutput& output, s32 timeout_secs = 5);
+s32 shell_exec(string program, vector<string> args, ShellOutput& output, s32 timeout_secs = 5);
 
 IP parse_ip(string str);
 void test_ips();
@@ -429,5 +644,18 @@ inline void print_ip(IP ip) {
                 );
     }
 }
+
+inline string join_strs(string joiner, vector<string>strs) {
+    if(strs.size() == 0)
+        return "";
+    if(strs.size() == 1)
+        return strs[0];
+    string out = strs[0];
+    for(auto i = 1; i < strs.size(); i++) {
+        out += (joiner + strs[i]);
+    }
+    return out;
+}
+
 
 #endif //_COMMON_HH_

@@ -2,6 +2,9 @@
 #define _PACKET_MAP_HH_
 
 #include "common.hh"
+#include <cassert>
+
+using std::pair;
 
 namespace PM {
 

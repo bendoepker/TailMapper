@@ -209,7 +209,7 @@ void start_gui(Global *g) {
 cont:
     /* gui thread and window are not running, set it to active and create them */
     g->gui_active = true;
-    g->gui_thread = CreateThread(NULL, 0, UI::Thread, (void*)g, 0, 0);
+    g->gui_thread = CreateThread(NULL, 0, UI::thread, (void*)g, 0, 0);
     if(!g->gui_thread) {
         g->gui_active = false;
         return;
@@ -233,6 +233,7 @@ s32 init_global_data(Global& g) {
     g.shutdown_event = false;
     g.config_path = get_config_path();
     g.conf = load_config(g);
+    g.rmap = {};
 
     return 0;
 }
@@ -284,6 +285,12 @@ LRESULT CALLBACK handle_custom_messages(Global& g, UINT msg, WPARAM wParam, LPAR
             post_ts_message(g, WM_TM_REFRESH, 0, 0);
             return 0;
         case WM_TM_PM_THREAD_READY:
+            return 0;
+        case WM_TM_DISABLE_ALL_MAPS:
+            /* TODO: */
+            return 0;
+        case WM_TM_RECALC_FILTERS:
+            post_pm_message(g, WM_TM_RECALC_FILTERS, 0, 0);
             return 0;
         default:
             return 1;
