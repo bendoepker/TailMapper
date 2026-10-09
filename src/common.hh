@@ -114,6 +114,7 @@ using std::atomic;
 using std::map;
 using std::pair;
 using std::string;
+using std::tuple;
 using std::vector;
 using sclock = std::chrono::system_clock;
 using time_point = std::chrono::time_point<sclock>;
@@ -240,7 +241,32 @@ class sIP {
 public:
     /* simplified IP structure */
     /* no invalid ips allowed here */
-    sIP() = delete;
+    sIP() = default;
+    sIP(u8* bytes, u32 version) {
+        if(version == 4) {
+            this->version = version;
+            memcpy(this->addr, bytes, 4);
+            memset(this->mask, 0xff, 4);
+            this->_match = [](u8 *tb, u8 *rb, u8 *filter) {
+                return (*((u32*)tb) & *((u32*)filter))
+                    == (*((u32*)rb) & *((u32*)filter));
+            };
+        } else if(version == 6) {
+            this->version = 6;
+            memcpy(this->addr, bytes, 16);
+            memset(this->mask, 0xff, 16);
+            this->_match = [](u8 *tb, u8 *rb, u8 *filter) {
+                return (
+                    (((u64*)tb)[0] & ((u64*)filter)[0])
+                        == (((u64*)rb)[0] & ((u64*)filter)[0])
+                    && (((u64*)tb)[1] & ((u64*)filter)[1])
+                        == (((u64*)rb)[1] & ((u64*)filter)[1])
+                );
+            };
+        } else {
+            static_assert(1, "Invalid IP Version sent to sIP");
+        }
+    }
     sIP(IP& ip) {
         assert(!(ip.flags & IP_PARSE_FAILED) && "Invalid IP sent to _sIP()");
         if((ip.flags & IP_FORMAT_IPV4) == IP_FORMAT_IPV4) {
@@ -389,17 +415,54 @@ typedef struct _IPAddr {
 } IPAddr;
 }
 
+typedef struct _SingleRouteMap {
+    _SingleRouteMap(sIP remote_alias, sIP remote_actual) {
+        this->remote_alias = remote_alias;
+        this->remote_actual = remote_actual;
+    }
+    _SingleRouteMap(sIP remote_alias, sIP remote_actual,
+                    sIP local_alias, sIP local_actual) {
+        this->remote_alias = remote_alias;
+        this->remote_actual = remote_actual;
+        this->local_alias = local_alias;
+        this->local_actual = local_actual;
+    }
+    /*
+     *  User thinks:
+     *  src                  dest
+     *  192.168.10.19   ->   10.0.0.5
+     *
+     *  In reality:
+     *  src                  dest
+     *  ...::a6:b5:23   ->   ...::a0:05
+     *
+     *
+     *  All together:
+     *  src                  dest
+     *  192.168.10.19   ->   10.0.0.5
+     *  ...::a6:b5:23   ->   ...::a0:05
+     *
+     *  Maps to:
+     *  src                  dest
+     *  [local_alias]   ->   [remote_alias]
+     *  [local_actual]  ->   [remote_actual]
+     *
+     *  NOTE: These are actually cidr addresses for the remote alias/actual
+     *  and normal IPs for local alias/actual, local_* is used for the src/dest
+     *  addresses to be applied to outbound/inbound packets respectively,
+     *  remote alias/actual is used to figure out what the mapping to an address is.
+     *  Since tailscale will always be addressing from a fixed IP the local actual
+     *  should always be a single IP address, and the local alias is whatever
+     *  windows initially considers the best route for the remote alias address
+     */
+    sIP remote_alias;   /* the ip that the user thinks they are connecting to */
+    sIP remote_actual;  /* the actual ip that the user is connecting to */
+    sIP local_alias;    /* the ip that the user thinks they are sending from */
+    sIP local_actual;   /* the actual ip that is sent as the src for outbound packets */
+} SingleRouteMap;
+
 class RouteMap {
 public:
-    /*
-     *      192.168.10.0/24 <-> fd7a:115c:a1e0:b1a:0:1:c0a8:0a00/120
-     *
-     *      RouteMap rm {{}};
-     *      auto addr = rm.local[fd7a:115c:a1e0:b1a:0:1:c0a8:0a21]
-     *      // addr == 192.168.10.21
-     *      auto addr = rm.remote[192.168.10.21]
-     *      // addr == fd7a:115c:a1e0:b1a:0:1:c0a8:0a21
-     */
     RouteMap() = default;
     void add_route(Route& r);
     void remove_route(Route& r);
@@ -413,8 +476,16 @@ public:
     /* Get the IPv6 equivalent to an IPv4 addr */
     Common::IPAddr get_outbound_mapping(u8 *addr);
 
+    Common::IPAddr get_local_alias(u8 *remote_actual, u8 *remote_alias);
+
+    void set_local_addrs(u8 *remote_actual, u8 *remote_alias, u8 *ipv4, u8 *ipv6);
+
+private:
     /* .first == local IP && .second == remote IP */
-    vector<pair<sIP, sIP>> _routes;
+    /*
+     *
+     */
+    vector<SingleRouteMap> _routes;
 };
 
 typedef struct _Peer {
@@ -484,8 +555,37 @@ typedef struct _PacketMapData {
     vector<string> inbound_rules, outbound_rules;
 
     /* working data fields */
-    OVERLAPPED ov;
+    OVERLAPPED rov;
+    OVERLAPPED sov;
+    bool send_pending;
+    bool recv_pending;
+    HANDLE message_ready;
     WINDIVERT_ADDRESS addr;
+    UINT addr_len;
+    /*
+     *  [        <- pbufsz ->             ]
+     *  ^     [     <- spbufsz ->         ]
+     *  |     ^   [     <- opbufsz ->     ]
+     *  |     |   ^
+     *  |     |   opbuf
+     *  |     spbuf
+     *  pbuf
+     *
+     *  opbuf -> The buffer addr received from windivert
+     *  spbuf -> The buffer addr sent to windivert
+     *  pbuf  -> The buffer addr of actual allocated space
+     *
+     *  *bufsz   -> The allocated size of [*]buf
+     *
+     *  The three buffers overlap, this avoids the need to reallocate and copy
+     *  data, or to memmove the entire packet on each recv/send pair
+     */
+    BYTE *pbuf;     /* Packet Buffer */
+    UINT pbufsz;    /* Size of the Packet Buffer */
+    BYTE *opbuf;    /* Offset Packet Buffer */
+    UINT opbufsz;   /* Size of the Packet Buffer starting at the offset */
+    BYTE *spbuf;    /* Pointer to the Packet Buffer after IPHDR mods */
+    UINT spbufsz;   /* Size of the Packet Buffer after IPHDR mods */
     UINT packet_len;
 } PacketMapData;
 
@@ -501,7 +601,7 @@ typedef struct _Global {
     string config_path;
 
     HWND main_window;
-    atomic<bool> shutdown_event;
+    HANDLE shutdown_event;
 
     /* tailscale runner thread */
     HANDLE ts_thread;
@@ -529,6 +629,10 @@ typedef struct _Global {
     RouteMap rmap;
 
     Config conf;
+
+    u32 host_addr_ipv4;     /* IP address that the host believes it is */
+    u8 host_addr_ipv6[16];  /* IP address that tailscale says it is */
+    HANDLE host_addrs_ready;
 } Global;
 
 string shell_error_to_string(s32 error_code);

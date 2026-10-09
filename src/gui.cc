@@ -31,7 +31,7 @@ ULONG UI::thread(void *_g) {
     }
 
     /* prevent a weird reentrancy bug */
-    if(g->shutdown_event)
+    if(WaitForSingleObject(g->shutdown_event, 0) == WAIT_OBJECT_0)
         return 1;
 
     window(g);
@@ -98,7 +98,7 @@ void window(Global *g) {
 
     while (!glfwWindowShouldClose(window))
     {
-        if(g->shutdown_event) {
+        if(WaitForSingleObject(g->shutdown_event, 0) == WAIT_OBJECT_0) {
             TRACE("%s", "Received shutdown event");
             glfwSetWindowShouldClose(window, 1);
             break;

@@ -20,6 +20,7 @@ void ts_parse_status(Global *g, ShellOutput& so);
 TailscaleState ts_parse_state(basic_json& state);
 void ts_start_tailscale(Global *g);
 void ts_parse_peers(Global *g, basic_json& _json);
+void ts_parse_self(Global *g, basic_json& _json);
 TailnetError ts_fix_run_state(Global *g);
 TailnetError ts_start_daemon(Global *g);
 vector<Route> ts_parse_peer_routes(basic_json& _json);
@@ -200,7 +201,7 @@ DWORD WINAPI TS::thread(void *_g) {
     PostMessage(g->main_window, WM_TM_TS_THREAD_READY, 0, 0);
 
     for(;;) {
-        if(g->shutdown_event) {
+        if(WaitForSingleObject(g->shutdown_event, 0) == WAIT_OBJECT_0) {
             TRACE("%s", "Received shutdown event");
             return 0;
         }
@@ -295,9 +296,10 @@ void ts_parse_status(Global *g, ShellOutput& so) {
     try {
         auto output = json::parse(so.std_out);
         g->ts.state = ts_parse_state(output);
-        if(g->ts.state == TailscaleState::Running)
+        if(g->ts.state == TailscaleState::Running) {
             ts_parse_peers(g, output);
-        else {
+            ts_parse_self(g, output);
+        } else {
             ts_fix_run_state(g);
         }
     } catch(const json::parse_error& e) {
@@ -456,4 +458,28 @@ TailscaleState ts_status_state_only(Global *g) {
         /* this shouldn't be a possible route, if it does happen we just clear the output buffer */
         return TailscaleState::InvalidState;
     }
+}
+
+void ts_parse_self(Global *g, basic_json& _json) {
+    /* get the IP address of the current node */
+    if(!_json.contains("Self") || _json["Self"].is_null())
+        return;
+    auto self = _json["Self"];
+    if(!self.contains("TailscaleIPs") || !self["TailscaleIPs"].is_array())
+        return;
+    auto ips = self["TailscaleIPs"];
+    if(!(ips.size() == 2) || !ips[0].is_string() || !ips[1].is_string())
+        return;
+    for(auto& ip_str : ips) {
+        IP ip = parse_ip(ip_str);
+        if(ip.flags & IP_PARSE_FAILED)
+            return;
+        sIP addr = sIP(ip);
+        if(addr.version == 4) {
+            memcpy(&g->host_addr_ipv4, addr.addr, 4);
+        } else {
+            memcpy(&g->host_addr_ipv6, addr.addr, 16);
+        }
+    }
+    SetEvent(g->host_addrs_ready);
 }

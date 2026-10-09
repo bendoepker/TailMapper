@@ -4,6 +4,7 @@
 #include "../assets/assets.h"
 #include "gui.hh"
 #include "tailnet.hh"
+#include "packet_map.hh"
 
 #define WM_TRAYICON (WM_USER + 1)
 #define ID_TRAY_EXIT 2001
@@ -19,6 +20,7 @@ void remove_tray_icon();
 void start_gui(Global *g);
 s32 init_gui_data(Global& g);
 s32 init_global_data(Global& g);
+s32 init_pm_data(Global& g);
 void post_ts_message(Global& g, UINT msg, WPARAM wParam, LPARAM lParam);
 void post_pm_message(Global& g, UINT msg, WPARAM wParam, LPARAM lPARAM);
 LRESULT CALLBACK handle_custom_messages(Global& g, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -52,11 +54,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     hInst = hInstance;
     Global g {};
-    if(init_global_data(g))
-        return 1;
-    if(init_gui_data(g))
-        return 1;
-    if(TS::init(g))
+    if(init_global_data(g)
+        || init_gui_data(g)
+        || init_pm_data(g)
+        || TS::init(g))
         return 1;
 
     TRACE("%s", "Data Initialized");
@@ -230,11 +231,28 @@ s32 init_global_data(Global& g) {
     TRACE();
     g.site_map_1 = map<u16, Site>{};
     g.site_map_2 = map<u16, Site>{};
-    g.shutdown_event = false;
+    g.shutdown_event = CreateEvent(0, 1, 0, 0);
+    g.host_addrs_ready = CreateEvent(0, 1, 0, 0);
     g.config_path = get_config_path();
     g.conf = load_config(g);
     g.rmap = {};
 
+    return 0;
+}
+
+s32 init_pm_data(Global& g) {
+    TRACE();
+    g.pm.message_ready = CreateEvent(0, 1, 0, 0);
+    g.pm.rov.hEvent = CreateEvent(0, 1, 0, 0);
+    g.pm.sov.hEvent = CreateEvent(0, 1, 0, 0);
+    g.pm.working = false;
+    g.pm.pbuf = (BYTE*)malloc(PACKET_BUFFER_SZ);
+    g.pm.pbufsz = PACKET_BUFFER_SZ;
+    g.pm.spbuf = g.pm.pbuf;     /* temp value, this is overwritten by pm_translate_[in/out]bound() */
+    g.pm.spbufsz = g.pm.pbufsz; /* temp value, this is overwritten by pm_translate_[in/out]bound() */
+    g.pm.opbuf = g.pm.pbuf + IP_HDR_HEADROOM;
+    g.pm.opbufsz = PACKET_BUFFER_SZ - IP_HDR_HEADROOM;
+    g.pm.send_pending = false;
     return 0;
 }
 
@@ -251,6 +269,7 @@ void post_pm_message(Global& g, UINT msg, WPARAM wParam, LPARAM lParam) {
         return;
     }
     PostThreadMessage(g.pm_thread_id, msg, wParam, lParam);
+    SetEvent(g.pm.message_ready);
 }
 
 LRESULT CALLBACK handle_custom_messages(Global& g, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -260,10 +279,13 @@ LRESULT CALLBACK handle_custom_messages(Global& g, UINT msg, WPARAM wParam, LPAR
             post_ts_message(g, msg, wParam, lParam);
             return 0;
         case WM_TM_ENABLE_MAP:
-            post_pm_message(g, msg, wParam, lParam);
+            // Deprecated
+            //post_pm_message(g, msg, wParam, lParam);
             return 0;
         case WM_TM_DISABLE_MAP:
-            post_pm_message(g, msg, 0, 0);
+            // Deprecated
+            //post_pm_message(g, msg, 0, 0);
+            return 0;
         case WM_TM_FATAL_ERROR:
             ERR("%s", tme_message(wParam));
             if(wParam == TME_FATAL_ERROR_GENERIC)
@@ -301,7 +323,7 @@ void clean_resources(Global& g) {
     /* signal the threads to close, they get 2 seconds of grace
      * period before they are forcefully closed */
     TRACE();
-    g.shutdown_event = true;
+    SetEvent(g.shutdown_event);
     if(g.gui_thread) {
         if(WaitForSingleObject(g.gui_thread, 2000) == WAIT_TIMEOUT) {
             ERR("%s", "GUI Thread failed to close in time, forcefully closing it");

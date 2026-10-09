@@ -651,7 +651,7 @@ void RouteMap::add_route(Route& r) {
     auto lsid = sIP(r.local_ip);
     auto rsid = sIP(r.remote_ip);
     for(auto& v : this->_routes) {
-        if(v.first == lsid || v.second == rsid) return;
+        if(v.remote_alias == lsid || v.remote_actual == rsid) return;
     }
     this->_routes.push_back({lsid, rsid});
     PRINT("Adding route %s : %s", ip_to_str(r.local_ip).c_str(), ip_to_str(r.remote_ip).c_str());
@@ -661,10 +661,10 @@ void RouteMap::remove_route(Route& r) {
     /* the ip address is wrong, just ignore it */
     if(!(r.local_ip.flags & IP_FORMAT_IPV4) || !(r.remote_ip.flags & IP_FORMAT_IPV6))
         return;
-    auto lsid = sIP(r.local_ip);
-    auto rsid = sIP(r.remote_ip);
+    auto lsip = sIP(r.local_ip);
+    auto rsip = sIP(r.remote_ip);
     for(auto i = 0; i < this->_routes.size(); i++) {
-        if(this->_routes[i].first == lsid && this->_routes[i].second == rsid) {
+        if(this->_routes[i].remote_alias == lsip && this->_routes[i].remote_actual == rsip) {
             this->_routes.erase(this->_routes.begin() + i);
             PRINT("Removing route %s : %s", ip_to_str(r.local_ip).c_str(), ip_to_str(r.remote_ip).c_str());
         }
@@ -672,10 +672,10 @@ void RouteMap::remove_route(Route& r) {
 }
 
 bool RouteMap::route_in_map(Route& r) {
-    auto lsid = sIP(r.local_ip);
-    auto rsid = sIP(r.remote_ip);
+    auto lsip = sIP(r.local_ip);
+    auto rsip = sIP(r.remote_ip);
     for(auto& v : this->_routes) {
-        if(v.first == lsid || v.second == rsid) {
+        if(v.remote_alias == lsip || v.remote_actual == rsip) {
             return true;
         }
     }
@@ -690,9 +690,9 @@ string RouteMap::get_inbound_filter() {
     vector<string> rules {};
     for(auto &route : this->_routes) {
         rules.push_back("(remoteAddr >= "
-                + route.second.min_ip()
+                + route.remote_actual.min_ip()
                 + " and remoteAddr <="
-                + route.second.max_ip()
+                + route.remote_actual.max_ip()
                 + ")");
     }
     return join_strs(" or ", rules);
@@ -706,9 +706,9 @@ string RouteMap::get_outbound_filter() {
     vector<string> rules {};
     for(auto &route : this->_routes) {
         rules.push_back("(remoteAddr >= "
-                + route.first.min_ip()
+                + route.remote_alias.min_ip()
                 + " and remoteAddr <="
-                + route.first.max_ip()
+                + route.remote_alias.max_ip()
                 + ")");
     }
     return join_strs(" or ", rules);
@@ -722,7 +722,7 @@ Common::IPAddr RouteMap::get_inbound_mapping(u8 *addr) {
 Common::IPAddr RouteMap::get_outbound_mapping(u8 *addr) {
     Common::IPAddr out = {};
     for(auto& r : this->_routes) {
-        if(r.first.match(addr, 4)) {
+        if(r.remote_alias.match(addr, 4)) {
             /*
              *  A match is found, map in the correct parts of the addresses as such:
              *
@@ -733,10 +733,10 @@ Common::IPAddr RouteMap::get_outbound_mapping(u8 *addr) {
              *  zz:zz -> ipv4 addr inset in ipv6 addr
              */
             /* Copy the first half quick fast style */
-            ((u64*)out.addr)[0] = ((u64*)r.second.addr)[0];
+            ((u64*)out.addr)[0] = ((u64*)r.remote_actual.addr)[0];
 
             /* Copy the third quarter quickish fastish style */
-            ((u32*)out.addr)[2] = ((u32*)r.second.addr)[2];
+            ((u32*)out.addr)[2] = ((u32*)r.remote_actual.addr)[2];
 
             /* repeat for the addr map */
             ((u32*)out.addr)[3] = ((u32*)addr)[0];
@@ -745,4 +745,33 @@ Common::IPAddr RouteMap::get_outbound_mapping(u8 *addr) {
         }
     }
     return out;
+}
+
+Common::IPAddr RouteMap::get_local_alias(u8 *remote_actual, u8 *remote_alias) {
+    if(remote_actual) {
+    } else if(remote_alias) {
+    }
+    return {};
+}
+
+void RouteMap::set_local_addrs(u8 *remote_actual, u8 *remote_alias,
+                                        u8 *ipv4, u8 *ipv6) {
+    auto idx = -1;
+    if(remote_actual) {
+        for(auto i = 0; i < this->_routes.size(); i++) {
+            if(this->_routes[i].remote_actual.match(remote_actual, 6)) {
+                idx = i;
+                break;
+            }
+        }
+    } else if(remote_alias) {
+        for(auto i = 0; i < this->_routes.size(); i++) {
+            if(this->_routes[i].remote_alias.match(remote_alias, 4)) {
+                idx = i;
+                break;
+            }
+        }
+    }
+    if(idx == -1)
+        return;
 }
